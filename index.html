@@ -275,6 +275,74 @@ function results(){
   <button class="big sec" id="home">Volver al inicio</button>`;
   const r = $("#rep"); if(r) r.onclick = () => start(failed);
   $("#home").onclick = home;
+  sendSession().then(ok => {
+    const st = $("#st"); if(!st) return;
+    st.textContent = ok ? "✓ Resultado enviado a tu profesor" : "Sin conexión: se enviará la próxima vez que abras la web";
+  });
+}
+
+// ---------- Alumno (código) ----------
+function login(msg, val){
+  app.innerHTML = `<h1>Vocabulario de inglés</h1>
+  <div class="card"><div class="label">Tu código</div>
+    <input type="text" id="cod" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" value="${esc(val || "")}">
+    <p class="hint">${esc(msg || "Te lo da tu profesor")}</p></div>
+  <button class="big" id="ent">Entrar</button>`;
+  const inp = $("#cod"); inp.focus();
+  inp.onkeydown = e => { if(e.key === "Enter"){ e.preventDefault(); checkCode(); } };
+  $("#ent").onclick = checkCode;
+}
+async function checkCode(){
+  const c = $("#cod").value.trim().toUpperCase(); if(!c) return;
+  const b = $("#ent"); b.disabled = true; b.textContent = "Comprobando…";
+  try{
+    const r = await fetch(API_URL + "?codigo=" + encodeURIComponent(c));
+    const d = await r.json();
+    if(d.ok && d.nombre){ user = {codigo: c, nombre: d.nombre}; lsSet(LS_USER, user); flushPending(); home(); }
+    else login("Código no válido. Pídeselo a tu profesor.", c);
+  }catch(e){ login("No hay conexión. Inténtalo de nuevo.", c); }
+}
+
+// ---------- Envío de resultados ----------
+function sendSession(){
+  if(!user || !respLog.length) return Promise.resolve(true);
+  const n = Object.keys(attempts).length;   // palabras distintas respondidas
+  const activo = respLog.reduce((s, r) => s + r.tiempo_seg, 0);   // tiempo activo, sin pausas largas
+  const payload = {
+    codigo: user.codigo,
+    sesion: {
+      id: sessionId, inicio: sessionStart.toISOString(), fin: new Date().toISOString(),
+      duracion_seg: Math.round(activo), unidades: sessionUnits.join(", "),
+      modo: MODOS[mode], direccion: dir, total: n, aciertos_primera: firstTryOk,
+      porcentaje: n ? Math.round(firstTryOk / n * 100) : 0
+    },
+    respuestas: respLog
+  };
+  respLog = []; // evita enviar dos veces la misma sesión
+  const pend = lsGet(LS_PENDING, []); pend.push(payload); lsSet(LS_PENDING, pend.slice(-50));
+  return flushPending(payload);
+}
+// Cola de envíos: lo que no se pudo enviar se reintenta al volver a abrir la web
+let flushing = null;
+async function flushPending(extra){
+  if(flushing) await flushing;
+  flushing = (async () => {
+    let pend = lsGet(LS_PENDING, []);
+    if(extra && !pend.some(p => p.sesion.id === extra.sesion.id)) pend.push(extra); // por si localStorage no está disponible
+    let allOk = true;
+    for(const p of pend){
+      try{
+        const r = await fetch(API_URL, {method: "POST", headers: {"Content-Type": "text/plain;charset=utf-8"}, body: JSON.stringify(p)});
+        const d = await r.json();
+        // Se descarta si se guardó o si nunca se podrá guardar (código borrado, datos corruptos)
+        if(d.ok || d.error === "codigo_no_valido" || d.error === "json_invalido" || d.error === "sin_id_sesion"){
+          lsSet(LS_PENDING, lsGet(LS_PENDING, []).filter(x => x.sesion.id !== p.sesion.id));
+        } else allOk = false;
+      }catch(e){ allOk = false; break; }
+    }
+    return allOk;
+  })();
+  const res = await flushing; flushing = null; return res;
 }
 
 // ---------- Carga ----------
@@ -290,7 +358,9 @@ async function load(){
     catch(_){ app.innerHTML = `<p class="hint">No se pudo cargar el vocabulario. Comprueba la conexión y recarga la página.</p>`; return; }
   }
   if(!words.length){ app.innerHTML = `<p class="hint">Todavía no hay palabras en la hoja.</p>`; return; }
-  sel = new Set(units); home();
+  sel = new Set(units);
+  if(!user) return login();
+  home(); flushPending();
 }
 load();
 </script>
