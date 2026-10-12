@@ -42,11 +42,16 @@ ul.list{padding-left:18px;margin:6px 0;line-height:1.6}
 <body>
 <main id="app"></main>
 <script>
-// ====== CONFIGURACIÓN: enlace CSV de la hoja publicada ======
+// ====== CONFIGURACIÓN ======
+// Vocabulario: hoja publicada como CSV (lectura pública)
 const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRxgXXT3B4uRw_nRsbZG44Ue5EimXEHAZtPZwXh65X3nP1CfQ5MEiUD-S44t1M8W5UgkKlzVSXRc6Cj/pub?gid=0&single=true&output=csv";
-// ============================================================
+// Backend: Apps Script publicado como aplicación web
+const API_URL = "https://script.google.com/macros/s/AKfycbz0ybmxRghPIUVjmUyH6vwFOLY1X2Lq-ZMlNqrHiIJqpSr12A5Jt3N3DJ82pyce2eU/exec";
+// ===========================
 
-const LS_FAILS = "vocab_fallos_v1", LS_CACHE = "vocab_cache_v1";
+const LS_FAILS = "vocab_fallos_v1", LS_CACHE = "vocab_cache_v1", LS_USER = "vocab_alumno_v1", LS_PENDING = "vocab_pendientes_v1";
+const MODOS = {cards: "tarjetas", write: "escribir", test: "test"};
+const MAX_T = 60; // tope de segundos por respuesta
 const app = document.getElementById("app");
 const $ = s => document.querySelector(s);
 const $$ = s => document.querySelectorAll(s);
@@ -59,6 +64,9 @@ let words = [], units = [], sel = new Set(), dir = "en-es", mode = "write", only
 let fails = lsGet(LS_FAILS, {});
 let queue = [], current = null, total = 0, doneSet = new Set(), sessionFails = new Set(), firstTryOk = 0;
 let answered = false, prevFail = 0, wasFirst = false, poolAll = [];
+// Registro de la sesión para el profesor
+let user = lsGet(LS_USER, null), sessionId = "", sessionStart = null, sessionUnits = [];
+let respLog = [], attempts = {}, qStart = 0, ansTime = null;
 
 // ---------- CSV ----------
 function parseCSV(t){
@@ -114,6 +122,7 @@ function home(){
   const nf = words.filter(w => sel.has(w.unit) && (fails[w.id] || 0) > 0).length;
   const n = poolFor().length;
   app.innerHTML = `<h1>Vocabulario de inglés</h1>
+  <div class="top"><span>Hola, <b>${esc(user.nombre)}</b></span><button class="link" id="chg">Cambiar de alumno</button></div>
   <div class="card"><div class="label">Unidades</div><div class="chips">
     <button class="chip ${sel.size === units.length ? "on" : ""}" data-all="1">Todas</button>
     ${units.map(u => `<button class="chip ${sel.has(u) ? "on" : ""}" data-u="${esc(u)}">${esc(u)}</button>`).join("")}
@@ -139,6 +148,7 @@ function home(){
   $$("[data-m]").forEach(b => b.onclick = () => { mode = b.dataset.m; home(); });
   $("#of").onchange = e => { onlyFails = e.target.checked; home(); };
   $("#go").onclick = () => start(poolFor());
+  $("#chg").onclick = () => { if(confirm("¿Cambiar de alumno?")){ user = null; try{ localStorage.removeItem(LS_USER); }catch(e){} login(); } };
   $("#rf").onclick = () => { if(confirm("¿Borrar el historial de palabras falladas?")){ fails = {}; lsSet(LS_FAILS, fails); home(); } };
 }
 
@@ -147,16 +157,23 @@ function start(list){
   poolAll = words.filter(w => sel.has(w.unit));
   queue = shuffle(list.slice()); total = list.length;
   doneSet = new Set(); sessionFails = new Set(); firstTryOk = 0;
+  sessionId = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  sessionStart = new Date(); sessionUnits = [...new Set(list.map(w => w.unit))];
+  respLog = []; attempts = {};
   next();
 }
 function next(){
   if(!queue.length) return results();
   current = queue.shift(); answered = false;
+  qStart = Date.now(); ansTime = null;
   if(mode === "cards") renderCards(); else if(mode === "write") renderWrite(); else renderTest();
 }
 function grade(ok){
   answered = true;
   const id = current.id; prevFail = fails[id] || 0; wasFirst = !sessionFails.has(id);
+  attempts[id] = (attempts[id] || 0) + 1;
+  const secs = Math.min(((ansTime || Date.now()) - qStart) / 1000, MAX_T);
+  respLog.push({unidad: current.unit, ingles: current.en, correcta: ok, intento: attempts[id], tiempo_seg: Math.round(secs * 10) / 10});
   if(ok){
     if(wasFirst) firstTryOk++;
     doneSet.add(id);
@@ -174,6 +191,7 @@ function override(){
   if(i >= 0) queue.splice(i, 1);
   if(prevFail > 1) fails[id] = prevFail - 1; else delete fails[id];
   if(wasFirst){ sessionFails.delete(id); firstTryOk++; }
+  if(respLog.length) respLog[respLog.length - 1].correcta = true;
   doneSet.add(id); lsSet(LS_FAILS, fails); next();
 }
 function header(){
@@ -181,7 +199,7 @@ function header(){
   return `<div class="top"><button class="link" id="exit">✕ Salir</button><span>${doneSet.size}/${total}</span></div>
   <div class="bar"><div style="width:${p}%"></div></div>`;
 }
-const bindExit = () => { $("#exit").onclick = home; };
+const bindExit = () => { $("#exit").onclick = () => { if(respLog.length) sendSession(); home(); }; };
 const exHTML = () => current.ex ? `<div class="ex">${esc(current.ex)}</div>` : "";
 
 function renderCards(){
@@ -191,7 +209,7 @@ function renderCards(){
     <button class="big" id="flip">Mostrar respuesta</button>
     <div class="row hidden" id="gr"><button class="big sec" id="no">No la sabía</button><button class="big" id="yes">La sabía</button></div>`;
   bindExit();
-  $("#flip").onclick = () => { $("#back").classList.remove("hidden"); $("#tip").classList.add("hidden");
+  $("#flip").onclick = () => { ansTime = Date.now(); $("#back").classList.remove("hidden"); $("#tip").classList.add("hidden");
     $("#flip").classList.add("hidden"); $("#gr").classList.remove("hidden"); };
   $("#yes").onclick = () => { grade(true); next(); };
   $("#no").onclick = () => { grade(false); next(); };
@@ -248,7 +266,8 @@ function results(){
   const failed = words.filter(w => sessionFails.has(w.id));
   const pct = total ? Math.round(firstTryOk / total * 100) : 0;
   app.innerHTML = `<h1>Resultado</h1>
-  <div class="card"><div class="stat">${pct}%</div><p class="hint">${firstTryOk} de ${total} a la primera</p></div>
+  <div class="card"><div class="stat">${pct}%</div><p class="hint">${firstTryOk} de ${total} a la primera</p>
+    <p class="hint" id="st">Enviando resultado a tu profesor…</p></div>
   ${failed.length
     ? `<div class="card"><div class="label">A repasar</div><ul class="list">${failed.map(w => `<li><b>${esc(w.en)}</b> — ${esc(w.es)}</li>`).join("")}</ul></div>
        <button class="big" id="rep">Repasar estas ${failed.length}</button>`
