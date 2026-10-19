@@ -62,6 +62,16 @@ function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.rand
 
 let words = [], units = [], sel = new Set(), dir = "en-es", mode = "write", onlyFails = false, notice = "";
 let fails = lsGet(LS_FAILS, {});
+let maxN = lsGet("vocab_max_v1", 20);   // palabras por sesión (0 = todas); se recuerda en el móvil
+const MAX_OPC = [10, 20, 30, 0];
+const PESO_FALLO = 2;                    // papeletas extra por cada fallo acumulado
+const randInt = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+// Sorteo con pesos sin repetición (método Efraimidis–Spirakis):
+// cada palabra recibe una clave aleatoria u^(1/peso); se quedan las k claves más altas.
+function weightedPick(list, k){
+  return list.map(w => ({w, key: Math.pow(Math.random(), 1 / (1 + PESO_FALLO * (fails[w.id] || 0)))}))
+    .sort((x, y) => y.key - x.key).slice(0, k).map(x => x.w);
+}
 let queue = [], current = null, total = 0, doneSet = new Set(), sessionFails = new Set(), firstTryOk = 0;
 let answered = false, prevFail = 0, wasFirst = false, poolAll = [];
 // Registro de la sesión para el profesor
@@ -120,7 +130,7 @@ const a = w => dir === "en-es" ? w.es : w.en;
 const poolFor = () => words.filter(w => sel.has(w.unit) && (!onlyFails || (fails[w.id] || 0) > 0));
 function home(){
   const nf = words.filter(w => sel.has(w.unit) && (fails[w.id] || 0) > 0).length;
-  const n = poolFor().length;
+  const pool = poolFor().length, n = maxN ? Math.min(maxN, pool) : pool;
   app.innerHTML = `<h1>Vocabulario de inglés</h1>
   <div class="top"><span>Hola, <b>${esc(user.nombre)}</b></span><button class="link" id="chg">Cambiar de alumno</button></div>
   <div class="card"><div class="label">Unidades</div><div class="chips">
@@ -136,6 +146,9 @@ function home(){
     <button class="chip ${mode === "write" ? "on" : ""}" data-m="write">Escribir</button>
     <button class="chip ${mode === "test" ? "on" : ""}" data-m="test">Test</button>
   </div></div>
+  <div class="card"><div class="label">Palabras por sesión</div><div class="chips">
+    ${MAX_OPC.map(v => `<button class="chip ${maxN === v ? "on" : ""}" data-n="${v}">${v || "Todas"}</button>`).join("")}
+  </div>${maxN && pool > maxN ? `<p class="hint" style="text-align:left;margin-bottom:0">${maxN} de ${pool}: las que más fallas salen más a menudo</p>` : ""}</div>
   <div class="card"><label style="display:flex;gap:10px;align-items:center;cursor:pointer">
     <input type="checkbox" id="of" ${onlyFails ? "checked" : ""}> Solo palabras falladas (${nf})</label></div>
   <button class="big" id="go" ${n ? "" : "disabled"}>Empezar (${n} palabra${n === 1 ? "" : "s"})</button>
@@ -147,7 +160,8 @@ function home(){
   $$("[data-d]").forEach(b => b.onclick = () => { dir = b.dataset.d; home(); });
   $$("[data-m]").forEach(b => b.onclick = () => { mode = b.dataset.m; home(); });
   $("#of").onchange = e => { onlyFails = e.target.checked; home(); };
-  $("#go").onclick = () => start(poolFor());
+  $$("[data-n]").forEach(b => b.onclick = () => { maxN = +b.dataset.n; lsSet("vocab_max_v1", maxN); home(); });
+  $("#go").onclick = () => { const p = poolFor(); start(maxN && p.length > maxN ? weightedPick(p, maxN) : p); };
   $("#chg").onclick = () => { if(confirm("¿Cambiar de alumno?")){ user = null; try{ localStorage.removeItem(LS_USER); }catch(e){} login(); } };
   $("#rf").onclick = () => { if(confirm("¿Borrar el historial de palabras falladas?")){ fails = {}; lsSet(LS_FAILS, fails); home(); } };
 }
@@ -181,8 +195,10 @@ function grade(ok){
   } else {
     sessionFails.add(id);
     fails[id] = (fails[id] || 0) + 1;
-    // La palabra fallada vuelve a salir unas posiciones más adelante
-    queue.splice(Math.min(queue.length, 3 + Math.floor(Math.random() * 3)), 0, current);
+    // Repetición espaciada simple: vuelve entre 3 y 10 preguntas después, al azar;
+    // si ya la había fallado en esta sesión, antes (entre 2 y 5)
+    const gap = attempts[id] > 1 ? randInt(1, 4) : randInt(2, 9);
+    queue.splice(Math.min(queue.length, gap), 0, current);
   }
   lsSet(LS_FAILS, fails);
 }
