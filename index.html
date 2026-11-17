@@ -60,8 +60,9 @@ function lsGet(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.pa
 function lsSet(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
 function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
 
+let allWords = [], hasGroups = false;    // todas las palabras de la hoja / ¿existe la columna "grupo"?
 let words = [], units = [], sel = new Set(), dir = "en-es", mode = "write", onlyFails = false, notice = "";
-let fails = lsGet(LS_FAILS, {});
+let fails = {};                          // historial de fallos del alumno actual (se carga en applyUser)
 let maxN = lsGet("vocab_max_v1", 20);   // palabras por sesión (0 = todas); se recuerda en el móvil
 const MAX_OPC = [10, 20, 30, 0];
 const PESO_FALLO = 2;                    // papeletas extra por cada fallo acumulado
@@ -99,18 +100,37 @@ function setWords(text){
   const h = rows[0].map(headerKey);
   const idx = (names, d) => { const i = h.findIndex(x => names.includes(x)); return i >= 0 ? i : d; };
   const iU = idx(["unidad","clase","tema"], 0), iEn = idx(["ingles","english"], 1),
-        iEs = idx(["espanol","castellano","spanish"], 2), iEx = idx(["ejemplo","example"], 3);
+        iEs = idx(["espanol","castellano","spanish"], 2), iEx = idx(["ejemplo","example"], 3),
+        iG = idx(["grupo","grupos"], -1);
   if(!h.includes("ingles") && !h.includes("english")) throw new Error("cabeceras");
+  hasGroups = iG >= 0;
   const seen = new Set();
-  words = rows.slice(1).map(r => ({
+  allWords = rows.slice(1).map(r => ({
     unit: (r[iU] || "").trim() || "Sin unidad",
-    en: (r[iEn] || "").trim(), es: (r[iEs] || "").trim(), ex: (r[iEx] || "").trim()
+    en: (r[iEn] || "").trim(), es: (r[iEs] || "").trim(), ex: (r[iEx] || "").trim(),
+    groups: hasGroups ? parseGroups(r[iG]) : []
   })).filter(w => w.en && w.es).map(w => {
     let id = w.unit + "|" + w.en; while(seen.has(id)) id += "*"; seen.add(id);
     return {...w, id};
   });
-  units = [...new Set(words.map(w => w.unit))].sort((a,b) => a.localeCompare(b, "es", {numeric:true}));
 }
+// "1Bach, Andrés" → ["1bach", "andres"]: sin mayúsculas, tildes ni espacios sobrantes
+const parseGroups = s => String(s || "").split(/[,;]/)
+  .map(g => g.trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "")).filter(Boolean);
+
+// Filtra el vocabulario para el alumno: ve una palabra si comparte algún grupo con ella.
+// Palabras sin grupo: no las ve nadie. Si la hoja aún no tiene columna "grupo", se ven todas.
+function applyUser(){
+  const mine = new Set(user.grupos || []);
+  words = hasGroups ? allWords.filter(w => w.groups.some(g => mine.has(g))) : allWords.slice();
+  units = [...new Set(words.map(w => w.unit))].sort((a,b) => a.localeCompare(b, "es", {numeric:true}));
+  sel = new Set(units);
+  // Historial de fallos por alumno (antes era uno por móvil: se pasa al primer alumno que entre)
+  const key = LS_FAILS + "_" + user.codigo, old = lsGet(LS_FAILS, null);
+  fails = lsGet(key, null) || old || {};
+  if(old){ lsSet(key, fails); try{ localStorage.removeItem(LS_FAILS); }catch(e){} }
+}
+const saveFails = () => lsSet(LS_FAILS + "_" + user.codigo, fails);
 
 // ---------- Corrección ----------
 const norm = s => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
@@ -129,6 +149,12 @@ const a = w => dir === "en-es" ? w.es : w.en;
 // ---------- Inicio ----------
 const poolFor = () => words.filter(w => sel.has(w.unit) && (!onlyFails || (fails[w.id] || 0) > 0));
 function home(){
+  if(!words.length){
+    app.innerHTML = `<h1>Vocabulario de inglés</h1>
+    <div class="top"><span>Hola, <b>${esc(user.nombre)}</b></span><button class="link" id="chg">Cambiar de alumno</button></div>
+    <div class="card"><p class="hint">Todavía no tienes palabras asignadas. Habla con tu profesor.</p></div>`;
+    $("#chg").onclick = changeUser; return;
+  }
   const nf = words.filter(w => sel.has(w.unit) && (fails[w.id] || 0) > 0).length;
   const pool = poolFor().length, n = maxN ? Math.min(maxN, pool) : pool;
   app.innerHTML = `<h1>Vocabulario de inglés</h1>
@@ -162,8 +188,8 @@ function home(){
   $("#of").onchange = e => { onlyFails = e.target.checked; home(); };
   $$("[data-n]").forEach(b => b.onclick = () => { maxN = +b.dataset.n; lsSet("vocab_max_v1", maxN); home(); });
   $("#go").onclick = () => { const p = poolFor(); start(maxN && p.length > maxN ? weightedPick(p, maxN) : p); };
-  $("#chg").onclick = () => { if(confirm("¿Cambiar de alumno?")){ user = null; try{ localStorage.removeItem(LS_USER); }catch(e){} login(); } };
-  $("#rf").onclick = () => { if(confirm("¿Borrar el historial de palabras falladas?")){ fails = {}; lsSet(LS_FAILS, fails); home(); } };
+  $("#chg").onclick = changeUser;
+  $("#rf").onclick = () => { if(confirm("¿Borrar el historial de palabras falladas?")){ fails = {}; saveFails(); home(); } };
 }
 
 // ---------- Sesión ----------
@@ -200,7 +226,7 @@ function grade(ok){
     const gap = attempts[id] > 1 ? randInt(1, 4) : randInt(2, 9);
     queue.splice(Math.min(queue.length, gap), 0, current);
   }
-  lsSet(LS_FAILS, fails);
+  saveFails();
 }
 function override(){
   const id = current.id, i = queue.indexOf(current);
@@ -208,7 +234,7 @@ function override(){
   if(prevFail > 1) fails[id] = prevFail - 1; else delete fails[id];
   if(wasFirst){ sessionFails.delete(id); firstTryOk++; }
   if(respLog.length) respLog[respLog.length - 1].correcta = true;
-  doneSet.add(id); lsSet(LS_FAILS, fails); next();
+  doneSet.add(id); saveFails(); next();
 }
 function header(){
   const p = total ? Math.round(doneSet.size / total * 100) : 0;
@@ -308,13 +334,27 @@ function login(msg, val){
   inp.onkeydown = e => { if(e.key === "Enter"){ e.preventDefault(); checkCode(); } };
   $("#ent").onclick = checkCode;
 }
+function changeUser(){
+  if(!confirm("¿Cambiar de alumno?")) return;
+  user = null; try{ localStorage.removeItem(LS_USER); }catch(e){} login();
+}
+// Pregunta al script por el código. Devuelve {ok,nombre,grupos} o {ok:false}; lanza error si no hay red.
+async function askCode(c){
+  const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), 10000);
+  try{
+    const r = await fetch(API_URL + "?codigo=" + encodeURIComponent(c), {signal: ctrl.signal});
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
 async function checkCode(){
   const c = $("#cod").value.trim().toUpperCase(); if(!c) return;
   const b = $("#ent"); b.disabled = true; b.textContent = "Comprobando…";
   try{
-    const r = await fetch(API_URL + "?codigo=" + encodeURIComponent(c));
-    const d = await r.json();
-    if(d.ok && d.nombre){ user = {codigo: c, nombre: d.nombre}; lsSet(LS_USER, user); flushPending(); home(); }
+    const d = await askCode(c);
+    if(d.ok && d.nombre){
+      user = {codigo: c, nombre: d.nombre, grupos: parseGroups((d.grupos || []).join(","))};
+      lsSet(LS_USER, user); applyUser(); flushPending(); home();
+    }
     else login("Código no válido. Pídeselo a tu profesor.", c);
   }catch(e){ login("No hay conexión. Inténtalo de nuevo.", c); }
 }
@@ -367,16 +407,22 @@ async function load(){
   try{
     const r = await fetch(CSV_URL, {cache: "no-store"});
     if(!r.ok) throw new Error("http");
-    const t = await r.text(); setWords(t); lsSet(LS_CACHE, t);
+    const t = await r.text(); setWords(t); lsSet(LS_CACHE, t); notice = "";
   }catch(e){
     const c = lsGet(LS_CACHE, null);
     try{ if(!c) throw e; setWords(c); notice = "Sin conexión: usando la última copia guardada."; }
     catch(_){ app.innerHTML = `<p class="hint">No se pudo cargar el vocabulario. Comprueba la conexión y recarga la página.</p>`; return; }
   }
-  if(!words.length){ app.innerHTML = `<p class="hint">Todavía no hay palabras en la hoja.</p>`; return; }
-  sel = new Set(units);
+  if(!allWords.length){ app.innerHTML = `<p class="hint">Todavía no hay palabras en la hoja.</p>`; return; }
   if(!user) return login();
-  home(); flushPending();
+  // Se vuelve a comprobar el código en cada apertura: así se aplican al momento
+  // los cambios de grupos y los códigos dados de baja. Sin red, se usan los datos guardados.
+  try{
+    const d = await askCode(user.codigo);
+    if(d.ok && d.nombre){ user = {codigo: user.codigo, nombre: d.nombre, grupos: parseGroups((d.grupos || []).join(","))}; lsSet(LS_USER, user); }
+    else if(d.error === "codigo_no_valido"){ user = null; try{ localStorage.removeItem(LS_USER); }catch(e){} return login("Tu código ya no es válido. Pídele uno nuevo a tu profesor."); }
+  }catch(e){ /* sin conexión: seguimos con los grupos guardados */ }
+  applyUser(); home(); flushPending();
 }
 load();
 </script>
